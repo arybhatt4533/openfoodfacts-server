@@ -34,7 +34,7 @@ package ProductOpener::Auth;
 
 use ProductOpener::PerlStandards;
 use Exporter qw< import >;
-
+use ProductOpener::Cache qw(get_cache set_cache);
 use Log::Any qw($log);
 
 BEGIN {
@@ -769,28 +769,27 @@ None.
 =cut
 
 sub get_oidc_configuration () {
-	if (!$jwks) {
-		my $discovery_endpoint = $oidc_options{oidc_discovery_url};
+    # 1. Pehle cache se metadata uthao taaki Keycloak par load kam ho
+    $oidc_configuration = get_cache('oidc_configuration');
 
-		$log->info('Original OIDC configuration', {discovery_endpoint => $discovery_endpoint})
-			if $log->is_info();
+    if (!$oidc_configuration) {
+        my $discovery_endpoint = $oidc_options{oidc_discovery_url};
+        my $discovery_request = HTTP::Request->new(GET => $discovery_endpoint);
+        my $discovery_response = LWP::UserAgent::Plugin->new->request($discovery_request);
 
-		my $discovery_request = HTTP::Request->new(GET => $discovery_endpoint);
-		my $discovery_response = LWP::UserAgent::Plugin->new->request($discovery_request);
-		unless ($discovery_response->is_success) {
-			$log->error('Unable to load OIDC data from IdP',
-				{discovery_endpoint => $discovery_endpoint, response => $discovery_response->content})
-				if $log->is_error();
-			return;
-		}
+        unless ($discovery_response->is_success) {
+            $log->error('Unable to load OIDC data from IdP', {discovery_endpoint => $discovery_endpoint});
+            return;
+        }
 
-		$oidc_configuration = decode_json($discovery_response->content);
-		# $log->info('got discovery document', {discovery => $oidc_configuration}) if $log->is_info();
+        $oidc_configuration = decode_json($discovery_response->content);
+        
+        # 2. Result ko 2 ghante (7200 seconds) ke liye cache mein save karo
+        set_cache('oidc_configuration', $oidc_configuration, 7200);
+    }
 
-		_load_jwks_configuration_to_oidc_options($oidc_configuration->{jwks_uri});
-	}
-
-	return $oidc_configuration;
+    _load_jwks_configuration_to_oidc_options($oidc_configuration->{jwks_uri});
+    return $oidc_configuration;
 }
 
 =head2 _load_jwks_configuration_to_oidc_options( $jwks_uri )
@@ -811,16 +810,24 @@ None.
 =cut
 
 sub _load_jwks_configuration_to_oidc_options ($jwks_uri) {
-	my $jwks_request = HTTP::Request->new(GET => $jwks_uri);
-	my $jwks_response = LWP::UserAgent::Plugin->new->request($jwks_request);
-	unless ($jwks_response->is_success) {
-		$log->error('Unable to load JWKS from IdP', {response => $jwks_response->content}) if $log->is_error();
-		return;
-	}
+    # 1. JWKS keys ko cache se uthao
+    $jwks = get_cache('oidc_jwks');
 
-	$jwks = decode_json($jwks_response->content);
-	$log->info('got JWKS', {jwks => $jwks}) if $log->is_info();
-	return;
+    if (!$jwks) {
+        my $jwks_request = HTTP::Request->new(GET => $jwks_uri);
+        my $jwks_response = LWP::UserAgent::Plugin->new->request($jwks_request);
+        
+        unless ($jwks_response->is_success) {
+            $log->error('Unable to load JWKS from IdP', {response => $jwks_response->content});
+            return;
+        }
+
+        $jwks = decode_json($jwks_response->content);
+        
+        # 2. Ise 2 ghante ke liye cache karo taaki Keycloak down hone par bhi auth chalta rahe
+        set_cache('oidc_jwks', $jwks, 7200);
+    }
+    return;
 }
 
 =head2 write_auth_deprecated_headers()
